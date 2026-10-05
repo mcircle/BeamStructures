@@ -169,7 +169,6 @@ end
 
 Base.:-(a::Beam,b::Real) = Beam(a .- b...)
 Base.:-(a::Real,b::Beam) = Beam(a .- b...)
-
 Base.:abs2(b::Beam) = b*b
 Base.:/(a::Real,b::Beam) = Beam(a ./ b...)
 Base.:/(b::Beam,a::Real) = Beam(b ./ a...)
