@@ -180,8 +180,8 @@ Optimisers.init(o::Adam, x::Beam{T}) where{T} = (Beam{T}(zeros(T,7)...),Beam{T}(
 Optimisers.init(o::Adam, x::CurvedBeam{T}) where{T} = (CurvedBeam{T}(zero(T),zero(T),zero(T),zeros(T,5),zero(T),zero(T),zero(T)),CurvedBeam{T}(zero(T),zero(T),zero(T),zeros(T,5),zero(T),zero(T),zero(T)), T.(o.beta))
 Optimisers.init(o::WeightDecay, x::B) where{B<:BeamElement} = nothing
 Optimisers.isnumeric(::B) where{T,B<:BeamElement{T}} = true
-Optimisers.subtract!(a::Beam{T},b::Beam) where{T} = Beam{T}(a .- Beam{T}(merge(Optimisers.mapvalue(_->zero(T),Optimisers.functor(b)[1]),Optimisers.trainable(b)))...)
-Optimisers.subtract!(a::CurvedBeam{T},b::CurvedBeam) where{T} = CurvedBeam{T}(a .- CurvedBeam{T}(merge(Optimisers.mapvalue(_->zero(T),Optimisers.functor(b)[1]),Optimisers.trainable(b)))...)
+Optimisers.subtract!(a::Beam{T},b::Beam) where{T} = a - Beam{T}(merge(Optimisers.mapvalue(_->zero(T),Optimisers.functor(b)[1]),Optimisers.trainable(b)))
+Optimisers.subtract!(a::CurvedBeam{T},b::CurvedBeam) where{T} = a - CurvedBeam{T}(merge(Optimisers.mapvalue(_->zero(T),Optimisers.functor(b)[1]),Optimisers.trainable(b)))
 Optimisers.trainable(b::B) where{B<:BeamElement} = (;l = b.l,h = b.h,w = b.w,κ0 = b.κ0,E = b.E,θs = b.θs,θe = b.θe)
 
 Optimisers._trainable(b::Beam{T},fr) where{T} = Beam{T}(merge(Optimisers.mapvalue(_ -> nothing, Optimisers.functor(b)[1]), Optimisers.trainable(b)))
