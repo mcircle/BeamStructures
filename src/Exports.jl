@@ -250,7 +250,13 @@ using GeometryBasics,Dates
 
 
 
-using BSplineKit, StaticArrays, LinearAlgebra, Gmsh
+using BSplineKit, StaticArrays, LinearAlgebra
+
+"""Load Gmsh only when a STEP-export helper is actually invoked."""
+function _gmsh()
+    isdefined(@__MODULE__, :Gmsh) || @eval import Gmsh
+    Gmsh.gmsh
+end
 
 
 # ─────────────────────────────────────────────────────────
@@ -306,6 +312,7 @@ end
 # ─────────────────────────────────────────────────────────
 
 function add_wire!(corners, meshsize = 0.0)
+    gmsh = _gmsh()
     npts = length(corners)
 
     # Punkte anlegen
@@ -339,6 +346,8 @@ function add_beam_solid!(centerline, dcenterline, beam,
                          ;
                          nstations=20,meshsize=0.0)
 
+    gmsh = _gmsh()
+
     svals    = range(0.0, 1.0, length=nstations)
     hw, hh   = beam.w / 2, beam.h / 2
     wire_tags = Int[]
@@ -361,6 +370,7 @@ end
 function export_structure_step(str, beams, nodes;
                                 filename="structure",
                                 nstations=50)
+    gmsh = _gmsh()
     inits = zeros(Float32,beams,nodes)
     sol = str(inits, beams, nodes, true)  # EnsembleSolution
 
