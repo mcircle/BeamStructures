@@ -48,6 +48,8 @@ struct Free{A<:Real} <:Boundary{A}
     end 
     Free{T}(x,y = zero(T),ϕ = zero(T),fx = zero(T),fy = zero(T),mz = zero(T)) where{T<:Real} = new{T}(x,y,ϕ,fx,fy,mz)
 end
+type(::Free{T}) where{T} = Free
+type(::Type{Free{T}}) where{T} = Free
 (cl::Free{T})(displacement) where{T} = cl
 
 struct ExtForces{A<:Real} <: Boundary{A}

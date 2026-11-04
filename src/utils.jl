@@ -1,9 +1,11 @@
 
-function getnames(nodes::Vararg{<:Boundary,N}) where{N}
+# Vergibt stabile Knotennamen und akzeptiert unterschiedliche Boundary-Untertypen.
+function getnames(nodes::Vararg{Boundary,N}) where{N}
     NamedTuple{ntuple(i->Symbol(:Node_,i),N)}(nodes)
 end 
 
-function getnames(beams::Vararg{<:BeamElement,N}) where{N}
+# Vergibt stabile Balkennamen und akzeptiert unterschiedliche BeamElement-Untertypen.
+function getnames(beams::Vararg{BeamElement,N}) where{N}
     NamedTuple{ntuple(i->Symbol(:Beam_,i),N)}(beams)
 end 
 

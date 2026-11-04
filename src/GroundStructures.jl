@@ -210,59 +210,113 @@ function (str::GroundStructure)(residuals::T,values::T,beams::NamedTuple,nodes::
     residuals!(residuals,adj,sols,beams,nodes)
 end 
 
-function reduceposat(node::Boundary,beams::NamedTuple,y::AbstractArray{T,N},factors::AbstractVector{TF},beamnbrs) where{T,TF,N}
-    # @show beamnbrs
-    res = map((ind)-> factors[ind] .* ([node.ϕ,node.x,node.y] .- scalepos(beams[ind],y[2:4,2,ind],Val(2))),beamnbrs[1])
-    if isempty(res)
-        return Vector{T}()
-    end
-    reduce(hcat,res)
-end
-#at Clamp, force is equal to surounding
-reduceforceat(node::Clamp,Beams::NamedTuple,y::AbstractArray{T,3},facs::AbstractVector{TF},beamsidxs) where {T,TF} = Vector{T}()
-
-function reduceforceat(node::Boundary,Beams::NamedTuple,y::AbstractArray{T,3},factors::AbstractVector{TF},beamsidxs) where{T,TF}
-    # @show beamsidxs
-    solp = reduce((init,beampos)->init .+ factors[beampos] * scaleforce(Beams[beampos],y[[1,5,6],2,beampos]),beamsidxs[1];init = zeros(T,3))
-    solm = reduce((init,beampos)->init .+ factors[beampos] * scaleforce(Beams[beampos],y[[1,5,6],1,beampos]),beamsidxs[2];init = zeros(T,3)) 
-    return solp .- solm #.+ node[[6,4,5]]
-end 
-
-function residuals!(residuals::Matrix,adj::AbstractMatrix{TA},y::AbstractArray{T,N},beamstpl,nodestpl) where{T,TA,N}
-    
+"""Return the lower-triangular candidate-edge weights in beam order."""
+function adjacency_factors(adj::AbstractMatrix{T}) where{T}
     ids = getindices(size(adj,1))
-    adj_ = ifelse.(adj .> 1,1,adj)
-    adj_ = ifelse.(adj_ .< 0,0,adj)
+    clamp.(adj[ids],zero(T),one(T))
+end
 
+"""Write position compatibility residuals scaled by relaxed edge weights."""
+function reduceposat_weighted!(res,node::Boundary,beams::NamedTuple,
+                               y::AbstractArray{T,3},factors,beamnbrs) where{T}
+    for (column,beam) in enumerate(beamnbrs)
+        res[:,column] .= factors[beam] .* (
+            [node.ϕ,node.x,node.y] .-
+            scalepos(beams[beam],y[2:4,2,beam],Val(2)))
+    end
+    nothing
+end
+
+"""Write force equilibrium residuals scaled by relaxed edge weights."""
+function reduceforceat_weighted!(res,node::Boundary,beams::NamedTuple,
+                                 y::AbstractArray{T,3},factors,beamidxs) where{T}
+    res .= .-node[[6,4,5]]
+    for beam in beamidxs[1]
+        res .+= factors[beam] .* scaleforce(beams[beam],y[[1,5,6],2,beam])
+    end
+    for beam in beamidxs[2]
+        res .-= factors[beam] .* scaleforce(beams[beam],y[[1,5,6],1,beam])
+    end
+    nothing
+end
+
+function reduceforceat_weighted!(res,node::LinearSlider,beams::NamedTuple,
+                                 y::AbstractArray{T,3},factors,beamidxs) where{T}
+    tmp = copy(node[[6,4,5]])
+    for beam in beamidxs[1]
+        tmp .+= factors[beam] .* scaleforce(beams[beam],y[[1,5,6],2,beam])
+    end
+    for beam in beamidxs[2]
+        tmp .-= factors[beam] .* scaleforce(beams[beam],y[[1,5,6],1,beam])
+    end
+    res[1] = tmp[1]
+    res[2] = tmp[2] * cos(node.ϕ) + tmp[3] * sin(node.ϕ)
+    res[3] = atan(tmp[3],tmp[2]) - node.ϕ - π / 2f0
+    nothing
+end
+
+"""
+    residuals!(residuals, adj, y, beams, nodes; dfac=false)
+
+Compute force and position residuals. With `dfac=false` (the default), retain the
+existing unweighted residual path used by method 2. With `dfac=true`, scale each
+beam contribution by its relaxed adjacency value and enable its pullback.
+"""
+function residuals!(residuals::Matrix,adj::AbstractMatrix,y::AbstractArray,
+                    beamstpl,nodestpl;dfac::Bool=false)
+    residuals!(residuals,adj,y,beamstpl,nodestpl,Val(dfac))
+end
+
+function residuals!(residuals::Matrix,adj::AbstractMatrix{TA},
+                    y::AbstractArray{T,N},beamstpl,nodestpl,
+                    ::Val{false}) where{T,TA,N}
     branches = count(x->!isa(x,Clamp),nodestpl)
     residuals_forces = @view residuals[:,1:branches]
     residuals_positions = @view residuals[:,branches+1:end]
     forces = 1
-    positions = 1
     for (node,beams) in beamsatnode(adj,nodestpl,beamstpl)
-
         if forcesatnode(nodestpl[node])
             reduceforceat!(view(residuals_forces,:,forces),nodestpl[node],beamstpl,y,beams)
-            # residuals_forces[:,forces] .= res
             forces += 1
-        end 
-
-        if !isempty(beams[2]) 
-            # idxs = positions:positions + length(beams[2]) -1
+        end
+        if !isempty(beams[2])
             reduceposat!(view(residuals_positions,:,beams[2]),nodestpl[node],beamstpl,y,beams[2])
-            # positions = length(beams[2]) + 1
-        end  
-
+        end
     end
-    residuals 
-end 
-
-function residuals!(residuals::Matrix,adj::AbstractMatrix{T},y::EnsembleSolution,bn) where{T}
-    y = toArray(y)
-    residuals!(residuals,adj,y,bn.Beams,bn.Nodes)
+    residuals
 end
 
-function residuals!(residuals::Matrix,adj::AbstractMatrix{T},y::EnsembleSolution,beams,nodes) where{T}
-    y = toArray(y)
-    residuals!(residuals,adj,y,beams,nodes)
+function residuals!(residuals::Matrix,adj::AbstractMatrix{TA},
+                    y::AbstractArray{T,N},beamstpl,nodestpl,
+                    ::Val{true}) where{T,TA,N}
+    ids = getindices(size(adj,1))
+    length(beamstpl) == length(ids) || throw(ArgumentError(
+        "dfac=true requires one candidate beam for every lower-triangular adjacency entry"))
+    factors = adjacency_factors(adj)
+    branches = count(x->!isa(x,Clamp),nodestpl)
+    residuals_forces = @view residuals[:,1:branches]
+    residuals_positions = @view residuals[:,branches+1:end]
+    forces = 1
+    for (node,beams) in beamsatnode(adj,nodestpl,beamstpl)
+        if forcesatnode(nodestpl[node])
+            reduceforceat_weighted!(view(residuals_forces,:,forces),
+                nodestpl[node],beamstpl,y,factors,beams)
+            forces += 1
+        end
+        if !isempty(beams[2])
+            reduceposat_weighted!(view(residuals_positions,:,beams[2]),
+                nodestpl[node],beamstpl,y,factors,beams[2])
+        end
+    end
+    residuals
+end
+
+function residuals!(residuals::Matrix,adj::AbstractMatrix,
+                    y::EnsembleSolution,bn;dfac::Bool=false)
+    residuals!(residuals,adj,toArray(y),bn.Beams,bn.Nodes;dfac=dfac)
+end
+
+function residuals!(residuals::Matrix,adj::AbstractMatrix,
+                    y::EnsembleSolution,beams,nodes;dfac::Bool=false)
+    residuals!(residuals,adj,toArray(y),beams,nodes;dfac=dfac)
 end
