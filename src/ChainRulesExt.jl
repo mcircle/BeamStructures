@@ -975,7 +975,7 @@ function CRC.rrule(::typeof(admittance_matrix),solfw::AbstractArray{T,N},adj,str
             Δd[2, :] .-= y .* Δd[1, :]
             Δd[3,:]  .-= x .* Δd[1, :] 
             # Δd[1, :] .*= -1
-            Δd .-= (view(ȳ,i_,i_) + view(ȳ,j_,j_))
+            Δd .+= (view(ȳ,i_,i_) + view(ȳ,j_,j_))
 
             # Pullback der elementweisen Multiplikation mit d0
             ∂adj[id] += sum(d0 .* Δd ) 
@@ -985,8 +985,7 @@ function CRC.rrule(::typeof(admittance_matrix),solfw::AbstractArray{T,N},adj,str
     ad,admittance_back
 end 
 
-function CRC.rrule(::typeof(effective_compliance),
-                   k::AbstractMatrix{T}, dofs::Pair) where {T<:Real}
+function CRC.rrule(::typeof(effective_compliance),k::AbstractMatrix{T}, dofs::Pair) where {T<:Real}
     ids, ke, f = _compliance_system(k, dofs)
     displacement = ke \ f
     compliance = dot(f, displacement)
@@ -994,8 +993,7 @@ function CRC.rrule(::typeof(effective_compliance),
 
     function compliance_pullback(cotangent)
         dc = CRC.unthunk(cotangent)
-        dc isa CRC.AbstractZero &&
-            return (CRC.NoTangent(), CRC.ZeroTangent(), CRC.NoTangent())
+        dc isa CRC.AbstractZero && return (CRC.NoTangent(), CRC.ZeroTangent(), CRC.NoTangent())
         # A separate transpose solve is essential for nonsymmetric matrices.
         adjoint_displacement = transpose(ke) \ f
         dk = zeros(eltype(displacement), size(k))
@@ -1005,8 +1003,7 @@ function CRC.rrule(::typeof(effective_compliance),
     return compliance, compliance_pullback
 end
 
-function CRC.rrule(::typeof(effective_stiffness),
-                   k::AbstractMatrix{T}, dofs::Pair) where {T<:Real}
+function CRC.rrule(::typeof(effective_stiffness),k::AbstractMatrix{T}, dofs::Pair) where {T<:Real}
     compliance, compliance_back = CRC.rrule(effective_compliance, k, dofs)
     iszero(compliance) && throw(DomainError(compliance, "zero compliance has no finite reciprocal"))
     stiffness = inv(compliance)
