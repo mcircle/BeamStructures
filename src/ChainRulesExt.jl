@@ -991,7 +991,7 @@ function CRC.rrule(::typeof(effective_compliance),k::AbstractMatrix{T}, dofs::Pa
         dc = CRC.unthunk(cotangent)
         dc isa CRC.AbstractZero && return (CRC.NoTangent(), CRC.ZeroTangent(), CRC.NoTangent())
         # A separate transpose solve is essential for nonsymmetric matrices.
-        adjoint_displacement = transpose(ke) \ f
+        adjoint_displacement = transpose(ke .+ eps(T)) \ f
         dk = zeros(eltype(displacement), size(k))
         dk[ids, ids] .= -dc .* (adjoint_displacement * transpose(displacement))
         return CRC.NoTangent(), project_k(dk), CRC.NoTangent()
@@ -1002,7 +1002,7 @@ end
 function CRC.rrule(::typeof(effective_stiffness),k::AbstractMatrix{T}, dofs::Pair) where {T<:Real}
     compliance, compliance_back = CRC.rrule(effective_compliance, k, dofs)
     iszero(compliance) && throw(DomainError(compliance, "zero compliance has no finite reciprocal"))
-    stiffness = inv(compliance)
+    stiffness = inv(compliance .+eps(T))
     function stiffness_pullback(cotangent)
         ds = CRC.unthunk(cotangent)
         ds isa CRC.AbstractZero &&
