@@ -530,8 +530,6 @@ function CRC.rrule(::typeof(residuals!),residuals::AbstractMatrix,
                 forcenbr += 1
             end
             if !isempty(beams[2])
-                reduceposat_back!(view(ȳ_positions,:,beams[2]),∂y,y,beams[2],nodetpl[node],beamtpl,∂beams)
-                ∂nodes += Tangent{NT}(;node =>  Tangent{typeof(nodetpl[node])}(;x = sum(ȳ_positions[2,beams[2]]),y =  sum(ȳ_positions[3,beams[2]]),ϕ = sum(ȳ_positions[1,beams[2]])))
                 ∂beams = reduceposat_back!(view(ȳ_positions,:,beams[2]),∂y,y,beams[2],nodetpl[node],beamtpl,∂beams)
                 ∂nodes += Tangent{NT}(;node =>  Tangent{typeof(nodetpl[node])}(;x = sum(ȳ_positions[2,beams[2]]),y =  sum(ȳ_positions[3,beams[2]]),ϕ = sum(ȳ_positions[1,beams[2]])))
                 
@@ -963,18 +961,16 @@ function CRC.rrule(::typeof(admittance_matrix),solfw::AbstractArray{T,N},adj,str
         
         ∂adj = zeros(T,size(adj)...)
         Δd = Matrix{eltype(adj)}(undef,3,3)
-        # dtmp = Matrix{eltype(adj)}(undef,3,3)
         for (id,beam,d0,sol) in zip(idxs,beams,d_out,eachslice(solfw,dims = 3))
             i_ = 3 * (id[1]-1)+1:3*id[1] 
             j_ = 3 * (id[2]-1)+1:3*id[2]
             x,y = sol[3:4,2] .- sol[3:4,1]
 
             Δd .=  -(view(ȳ,j_,i_)' + view(ȳ,i_,j_))
-            # Pullback der Transformationen von d
 
+            # Pullback der Transformationen von d
             Δd[2, :] .-= y .* Δd[1, :]
             Δd[3,:]  .-= x .* Δd[1, :] 
-            # Δd[1, :] .*= -1
             Δd .+= (view(ȳ,i_,i_) + view(ȳ,j_,j_))
 
             # Pullback der elementweisen Multiplikation mit d0

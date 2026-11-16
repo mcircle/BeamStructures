@@ -46,12 +46,17 @@ end
 
 
 function reduction_func_admittance!(u,data,I,solfw,adj,beams)
+    force_scale = Matrix{eltype(u)}(undef,3,1)
+    length_scale = Matrix{eltype(u)}(undef,1,3)
+    d = Matrix{eltype(u)}(undef,3,3)
+    length_scale[1,:] .= 1
     for (sol,id,d0,beam) in zip(eachslice(solfw,dims = 3),I,data,beams)
         isapprox(adj[id],0) && continue
-        l = beam.l
-        d = d0 .* adj[id] 
+        force_scale[:,1] .= normvector(beam)
+        length_scale[1,2:3] .= beam.l
+        d .= (force_scale .* d0 .* length_scale) .* adj[id] 
 
-        x,y = sol[3:4,2] .- sol[3:4,1]
+        x,y = (sol[3:4,2] .- sol[3:4,1]) .* beam.l
         # 1 = M, 2 = Fx , 3 = Fy
         i = id[1]
         j = id[2]
@@ -65,8 +70,8 @@ function reduction_func_admittance!(u,data,I,solfw,adj,beams)
         u[j_,i_] .-= d' 
     end 
     for (idx,val) in enumerate(diag(u))
-        iszero(val) || continue
-        u[idx,idx] =  eps(eltype(val)) # avoid singularity
+        # iszero(val) || continue
+        u[idx,idx] +=  eps(eltype(val)) # avoid singularity
     end
     u,false
 end 
@@ -134,12 +139,10 @@ function _compliance_system(k::AbstractMatrix{T}, dofs::Pair) where {T<:Real}
     fixed, loaded = collect(first(dofs)), collect(last(dofs))
     isempty(loaded) && throw(ArgumentError("at least one loaded DOF is required"))
     for indices in (fixed, loaded)
-        all(i -> i isa Integer && 1 <= i <= size(k, 1), indices) ||
-            throw(ArgumentError("DOFs must be integer indices within k"))
+        all(i -> i isa Integer && 1 <= i <= size(k, 1), indices) || throw(ArgumentError("DOFs must be integer indices within k"))
         allunique(indices) || throw(ArgumentError("DOFs must not contain duplicates"))
     end
-    isempty(intersect(fixed, loaded)) ||
-        throw(ArgumentError("loaded DOFs must not be fixed"))
+    isempty(intersect(fixed, loaded)) || throw(ArgumentError("loaded DOFs must not be fixed"))
     ids = setdiff(axes(k, 1), fixed)
     f = zeros(T, length(ids))
     f[Int[something(i) for i in indexin(loaded, ids)]] .= one(T)
@@ -192,8 +195,8 @@ end
 
 function check_structure(beams,nodes,adj)
     cbeams = reduce(+,1:size(adj,1)-1)
-    @assert cbeams == length(beams) "Missing Beams! Need $(cbeams) and got only $(length(bn.Beams))"
-    @assert size(adj,1) == length(nodes) "Missing Nodes! Need $(size(adj,1)) and got only $(length(nodetpl))"
+    @assert cbeams == length(beams) "Missing Beams! Need $(cbeams) and got only $(length(beams))"
+    @assert size(adj,1) == length(nodes) "Missing Nodes! Need $(size(adj,1)) and got only $(length(nodes))"
 end 
 
 function (str::GroundStructure)(x::AbstractMatrix,beams::NamedTuple,nodes::NamedTuple,adj::AbstractMatrix,plt::Bool=false)

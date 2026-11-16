@@ -26,6 +26,19 @@ function adjacency_residual_loss(factors,beams,nodes,states,weights;dfac)
     sum(BS.residuals!(residual,adjacency,states,beams,nodes;dfac=dfac) .* weights)
 end
 
+@testset "Unweighted position residual state pullback" begin
+    beams,nodes,states = adjacency_residual_fixture()
+    factors = [0.25,0.55,0.8]
+    direction = [Float64(i == 3 && j == 2 && k == 1) for i in 1:7, j in 1:2, k in 1:3]
+    weights = [Float64(i == 2 && j == 3) for i in 1:3, j in 1:5]
+    objective(x) = adjacency_residual_loss(factors,beams,nodes,states .+ x .* direction,weights;dfac=false)
+    h = 1e-5
+    difference = (objective(h)-objective(-h))/(2h)
+    reverse = only(Zygote.gradient(objective,0.0))
+    @test abs(difference) > 0
+    @test isapprox(reverse,difference;rtol=1e-5,atol=1e-7)
+end
+
 @testset "GroundStructure adjacency residual switch" begin
     factors = [0.25,0.55,0.8]
     beams,nodes,states = adjacency_residual_fixture()
