@@ -369,6 +369,13 @@ end
 
 force_bound_back(ȳ,∂y,y,beams,idxs,∂beams,::B) where{T,B<:Boundary{T}} = force_bound_back(ȳ,∂y,y,beams,idxs,∂beams)
 
+"""Backpropagate Branch force equilibrium using the physical beam ends."""
+function force_bound_back(ȳ,∂y,y,beams,idxs,∂beams,node::Branch)
+    ∂beams,_ = force_bound_back(ȳ,∂y,y,beams,force_equilibrium_sides(node,idxs),∂beams)
+    dnode = Tangent{typeof(node)}(;mz=-ȳ[1],fx=-ȳ[2],fy=-ȳ[3])
+    ∂beams,dnode
+end
+
 function force_bound_back(ȳ,∂y,y,beams,idxs,∂beams,node::No) where{T,No<:LinearSlider{T}}
     # res[1] = tmp[1]
     # res[2] = tmp[2] * cos(node.ϕ) + tmp[3] * sin(node.ϕ)
@@ -401,6 +408,7 @@ end
 
 """Reconstruct the unprojected weighted nodal force sum."""
 function weighted_force_sum(node::Boundary,beams,y,factors,beamidxs)
+    beamidxs = force_equilibrium_sides(node,beamidxs)
     tmp = .-node[[6,4,5]]
     for beam in beamidxs[1]
         tmp .+= factors[beam] .* scaleforce(beams[beam],y[[1,5,6],2,beam])
@@ -428,6 +436,7 @@ function reduceforceat_weighted_back!(ȳ,∂y,∂factors,y,factors,beamidxs,
                                       ∂beams=CRC.zero_tangent(beams)) where{names,Types,Bo,BT<:NamedTuple{names,Types}}
     tmp = weighted_force_sum(node,beams,y,factors,beamidxs)
     force_ȳ,dnode = force_sum_cotangent(node,ȳ,tmp)
+    beamidxs = force_equilibrium_sides(node,beamidxs)
     for beam in beamidxs[1]
         values = y[[1,5,6],2,beam]
         force,force_back = CRC.rrule(scaleforce,beams[beam],values)
@@ -535,7 +544,8 @@ function CRC.rrule(::typeof(residuals!),residuals::AbstractMatrix,
         for (node,beams) in beamsatnode(adj,nodetpl,beamtpl)
             
             if forcesatnode(nodetpl[node])
-                ∂beams,dnode = force_bound_back(view(ȳ_forces,:,forcenbr),∂y,y,beamtpl,beams,∂beams,nodetpl[node])        
+                ∂beams,dnode = force_bound_back(view(ȳ_forces,:,forcenbr),∂y,y,beamtpl,beams,∂beams,nodetpl[node])
+                ∂nodes += Tangent{NT}(;node => dnode)
                 forcenbr += 1
             end
             if !isempty(beams[2])
@@ -946,52 +956,70 @@ function CRC.rrule(str::GroundStructure,x::AbstractMatrix{T},beams::NamedTuple{b
 end 
 
 
-function CRC.rrule(::typeof(admittance_matrix),solfw::AbstractArray{T,N},adj,str,beams) where{T,N}
-    
-    idxs =getindices(size(adj,1))
-    lensol = length(beams)
-    prob_func = make_vjp_func(solfw,beams)
-    #dadj Gradient der Steifigkeitsmatrix berechnen  
-    ensprob2  =  EnsembleProblem(vjpprob;prob_func = prob_func,
-                                output_func = (bsol,i) ->  output_func_admittance(bsol,i,solfw),
-                                reduction = (u,data,I) -> reduction_func_admittance_!(u,data,idxs[I],solfw,adj,beams),
-                                u_init = [zeros(eltype(adj),3 .* size(adj)...),[]]
-                                )
-    sol = solve(ensprob2,str.Solver,
-                EnsembleThreads(),
-                reltol = 1e-6,abstol = 1e-6,
-                save_on = false,save_start=true,save_end = true,
-                trajectories = lensol
-                )
-
-    ad,d_out = sol.u
-    function admittance_back(ȳt)
-        ȳ = CRC.unthunk(ȳt)
-        
-        ∂adj = zeros(T,size(adj)...)
-        Δd = Matrix{eltype(adj)}(undef,3,3)
-        for (id,beam,d0,sol) in zip(idxs,beams,d_out,eachslice(solfw,dims = 3))
-            i_ = 3 * (id[1]-1)+1:3*id[1] 
-            j_ = 3 * (id[2]-1)+1:3*id[2]
-            x,y = (sol[3:4,2] .- sol[3:4,1]) .* beam.l
-
-            Δd .=  -(view(ȳ,j_,i_)' + view(ȳ,i_,j_))
-
-            # Pullback der Transformationen von d
-            fΔd = copy(Δd[1, :])
-            Δd[1, :] .*= -1
-            Δd[2, :] .-= y .* fΔd
-            Δd[3,:]  .-= x .* fΔd
-            Δd .+= (view(ȳ,i_,i_) + view(ȳ,j_,j_))
-            kraftskalierung = normvector(beam)
-            laengenskalierung = [one(T)  beam.l beam.l]  
-            # Pullback der elementweisen Multiplikation mit d0
-            ∂adj[id] += sum(d0 .* kraftskalierung .* laengenskalierung .* Δd)
+"""Adjacency pullback of the mixed tangent assembly at fixed beam states."""
+function CRC.rrule(::typeof(admittance_matrix),solfw::AbstractArray{T,3},adj,str,beams) where{T}
+    transfers = tangent_transfer_data(solfw,str,beams)
+    system,active = assemble_tangent_system(solfw,adj,beams,transfers)
+    ids = getindices(size(adj,1))
+    function admittance_back(cotangent)
+        cotangent = CRC.unthunk(cotangent)
+        cotangent isa CRC.AbstractZero &&
+            return (NoTangent(),NoTangent(),ZeroTangent(),NoTangent(),NoTangent())
+        matrix_bar = CRC.unthunk(cotangent.matrix)
+        matrix_bar isa CRC.AbstractZero &&
+            return (NoTangent(),NoTangent(),ZeroTangent(),NoTangent(),NoTangent())
+        adjacency_bar = zeros(eltype(adj),size(adj))
+        nq = system.node_dofs
+        for (slot,e) in enumerate(active)
+            i,j = Tuple(ids[e]);beam=beams[e]
+            endpoint=3(i-1)+1:3i
+            startpoint=3(j-1)+1:3j
+            forces=nq+3(slot-1)+1:nq+3slot
+            dx,dy=(solfw[3:4,2,e] .- solfw[3:4,1,e]) .* beam.l
+            _,fx,fy=scaleforce(beam,solfw[[1,5,6],1,e])
+            geometric=T[0 -fy fx;0 0 0;0 0 0]
+            force_transfer=T[1 dy -dx;0 1 0;0 0 1]
+            adjacency_bar[ids[e]] = sum(view(matrix_bar,endpoint,forces) .* force_transfer) -
+                tr(view(matrix_bar,startpoint,forces)) +
+                sum(view(matrix_bar,endpoint,endpoint) .* geometric) -
+                sum(view(matrix_bar,endpoint,startpoint) .* geometric)
         end
-        return NoTangent(),NoTangent(),∂adj,NoTangent(),NoTangent()
-    end 
-    ad,admittance_back
-end 
+        # The transfer matrices' state/geometry derivatives require higher-order ODE sensitivities.
+        NoTangent(),NoTangent(),adjacency_bar,NoTangent(),NoTangent()
+    end
+    system,admittance_back
+end
+
+"""Differentiate constrained compliance at fixed rank and fixed beam states."""
+function CRC.rrule(::typeof(effective_compliance),system::TangentSystem{T},dofs::Pair) where{T<:AbstractFloat}
+    free,load,solution,adjoint = tangent_response(system,dofs)
+    compliance = dot(load,solution)
+    function compliance_back(cotangent)
+        cotangent = CRC.unthunk(cotangent)
+        cotangent isa CRC.AbstractZero && return (NoTangent(),ZeroTangent(),NoTangent())
+        matrix_bar = zeros(T,size(system.matrix))
+        matrix_bar[free,free] .= -cotangent .* (adjoint * transpose(solution))
+        NoTangent(),Tangent{typeof(system)}(;matrix=matrix_bar,node_dofs=NoTangent()),NoTangent()
+    end
+    compliance,compliance_back
+end
+
+"""Differentiate the constrained solve at fixed rank and fixed beam states."""
+function CRC.rrule(::typeof(effective_stiffness),system::TangentSystem{T},dofs::Pair) where{T<:AbstractFloat}
+    free,load,solution,adjoint = tangent_response(system,dofs)
+    check_prescribed_motion(system,dofs)
+    denominator = dot(load,solution) + eps(T)
+    iszero(denominator) && throw(TangentCompatibilityError("regularized compliance has no finite reciprocal"))
+    stiffness = inv(denominator)
+    function stiffness_back(cotangent)
+        cotangent = CRC.unthunk(cotangent)
+        cotangent isa CRC.AbstractZero && return (NoTangent(),ZeroTangent(),NoTangent())
+        matrix_bar = zeros(T,size(system.matrix))
+        matrix_bar[free,free] .= cotangent * stiffness^2 .* (adjoint * transpose(solution))
+        NoTangent(),Tangent{typeof(system)}(;matrix=matrix_bar,node_dofs=NoTangent()),NoTangent()
+    end
+    stiffness,stiffness_back
+end
 
 function CRC.rrule(::typeof(effective_compliance),k::AbstractMatrix{T}, dofs::Pair) where {T<:Real}
     ids, ke, f = _regularized_compliance_system(k, dofs)

@@ -11,3 +11,7 @@ include("utils.jl")
 
 include("beam_derivatives.jl")
 include("ground_structure_adjacency_derivatives.jl")
+
+include("branch_force_equilibrium.jl")
+
+include("mixed_tangent.jl")

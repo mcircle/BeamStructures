@@ -154,10 +154,15 @@ function reduceposat(node::Joint,beams::NamedTuple,y::AbstractArray{T,3},beamnbr
     reduce(hcat,res)
 end
 
+"""Return incoming/end and outgoing/start beams for force equilibrium."""
+force_equilibrium_sides(::Boundary, sides) = sides
+force_equilibrium_sides(::Branch, sides) = (sides[2],sides[1])
+
 scaleforce(beam,y) =  y ./normvector(beam)
 
 function reduceforceat(node::Boundary,Beams::NamedTuple,y::AbstractArray{T,3},beamsidxs) where{T}
-    # scale the forces according to the beamdimensions and add them up
+    # The iterator stores outgoing beams before incoming beams.
+    beamsidxs = force_equilibrium_sides(node,beamsidxs)
     solp = reduce((init,beampos)->init .+ scaleforce(Beams[beampos],y[[1,5,6],2,beampos]),beamsidxs[1];init = .-node[[6,4,5]])
     solm = reduce((init,beampos)->init .- scaleforce(Beams[beampos],y[[1,5,6],1,beampos]),beamsidxs[2];init = solp ) 
     return solm 
@@ -165,7 +170,8 @@ end
 
 function reduceforceat!(res,node::Boundary,Beams::NamedTuple,y::AbstractArray{T,3},beamsidxs) where{T}
     # scale the forces according to the beamdimensions and add them up
-    # y solution of integration 
+    # y solution of integration
+    beamsidxs = force_equilibrium_sides(node,beamsidxs)
     res .-= node[[6,4,5]]
     for b in beamsidxs[1]
         res .+= scaleforce(Beams[b],y[[1,5,6],2,b])

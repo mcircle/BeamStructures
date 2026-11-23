@@ -107,26 +107,87 @@ function make_prob_func_admittance(sol::EnsembleSolution{T},adj,beams) where{T}
     end
 end
 
-function admittance_matrix(sol::AbstractArray{T,N},adj,str,beams) where{T,N}
-    # adj = sigmoid(adj)
-    idxs = getindices(size(adj,1))
-    lensol = length(beams)
-    
-    prob_func = make_vjp_func(sol,beams)
-    #dadj Gradient der Steifigkeitsmatrix berechnen  
-    ensprob2  =  EnsembleProblem(vjpprob;prob_func = prob_func,
-                                output_func = (bsol,i) ->  output_func_admittance(bsol,i,sol),
-                                reduction = (u,data,I) -> reduction_func_admittance!(u,data,idxs[I],sol,adj,beams),
-                                u_init = zeros(eltype(adj),3 .* size(adj)...),
-                                )
-    sol = solve(ensprob2,str.Solver,save_on = false,save_start = true,save_end = true,#save_idxs = ad,#[2,3,4,9,10,11,16,17,18,22,23,24],#
-                EnsembleThreads(),
-                reltol = 1e-6,abstol = 1e-6,
-                trajectories = lensol
-                )
-    
-    return sol.u
-end 
+"""The selected tangent load or displacement is not mechanically compatible."""
+struct TangentCompatibilityError <: Exception
+    message::String
+end
+Base.showerror(io::IO,error::TangentCompatibilityError) = print(io,error.message)
+
+"""Coupled nodal-displacement and active-beam-force tangent equations.
+
+Rows and columns start with three DOFs per node (angle, x, y), followed by
+three starting-force unknowns per active beam. Exact zero weights remove a
+beam; at that topology change the adjacency derivative is not defined.
+"""
+struct TangentSystem{T,M<:AbstractMatrix{T}}
+    matrix::M
+    node_dofs::Int
+end
+
+"""Collect each beam's end-position VJP in deterministic beam order."""
+function tangent_transfer_data(sol::AbstractArray{T,3},str,beams) where{T}
+    all(beam -> beam isa Beam,beams) ||
+        throw(ArgumentError("tangent system currently supports straight Beam elements only"))
+    function store_transfer!(result,data,indices)
+        for (block,index) in zip(data,indices)
+            result[index] = block
+        end
+        result,false
+    end
+    problem = EnsembleProblem(vjpprob;prob_func=make_vjp_func(sol,beams),
+        output_func=(beam_solution,index)->(Array(beam_solution)[[1,5,6,2,3,4],:,2],false),
+        reduction=store_transfer!,u_init=Vector{Matrix{T}}(undef,length(beams)))
+    solve(problem,str.Solver,EnsembleThreads();save_on=false,save_start=true,save_end=true,
+        reltol=1e-6,abstol=1e-6,trajectories=length(beams)).u
+end
+
+"""Build mixed tangent equations from force and position sensitivities."""
+function assemble_tangent_system(sol::AbstractArray{T,3},adj,beams,transfers) where{T}
+    n = size(adj,1)
+    size(adj,2) == n || throw(DimensionMismatch("adjacency must be square"))
+    ids = getindices(n)
+    length(ids) == length(beams) == size(sol,3) == length(transfers) ||
+        throw(DimensionMismatch("one state and beam per candidate edge are required"))
+    all(index -> isfinite(adj[index]) && zero(T) <= adj[index] <= one(T),ids) ||
+        throw(ArgumentError("adjacency weights must be finite and in [0,1]"))
+    active = findall(e -> !iszero(adj[ids[e]]),eachindex(ids))
+    nq = 3n
+    matrix = zeros(T,nq + 3length(active),nq + 3length(active))
+    for (slot,e) in enumerate(active)
+        i,j = Tuple(ids[e]) # lower-triangle entry: endpoint, startpoint
+        beam,block = beams[e],transfers[e]
+        scale = reshape(T[one(T),beam.l,beam.l],1,3)
+        compliance = transpose(reshape(normvector(beam),3,1) .* block[1:3,:] .* scale)
+        start_transfer = transpose(reshape(T[one(T),inv(beam.l),inv(beam.l)],3,1) .* block[4:6,:] .* scale)
+        endpoint = 3(i-1)+1:3i
+        startpoint = 3(j-1)+1:3j
+        forces = nq+3(slot-1)+1:nq+3slot
+        matrix[forces,endpoint] .+= I(3)
+        matrix[forces,startpoint] .-= start_transfer
+        matrix[forces,forces] .-= compliance
+        dx,dy = (sol[3:4,2,e] .- sol[3:4,1,e]) .* beam.l
+        _,fx,fy = scaleforce(beam,sol[[1,5,6],1,e])
+        geometric = T[0 -fy fx; 0 0 0; 0 0 0]
+        force_transfer = T[1 dy -dx; 0 1 0; 0 0 1]
+        weight = adj[ids[e]]
+        matrix[startpoint,forces] .-= weight .* I(3)
+        matrix[endpoint,forces] .+= weight .* force_transfer
+        matrix[endpoint,endpoint] .+= weight .* geometric
+        matrix[endpoint,startpoint] .-= weight .* geometric
+    end
+    TangentSystem(matrix,nq),active
+end
+
+"""Assemble a constrained physical tangent system for Clamp/Branch graphs.
+
+The return type is `TangentSystem`, not the historical 3n×3n sensitivity
+matrix. Use `effective_stiffness` with node DOF indices and check equilibrium
+separately. Geometric/state pullbacks are not implemented by the custom rrule.
+"""
+function admittance_matrix(sol::AbstractArray{T,3},adj,str,beams) where{T}
+    transfers = tangent_transfer_data(sol,str,beams)
+    first(assemble_tangent_system(sol,adj,beams,transfers))
+end
 
 function reduction_func_admittance_!((u,data_out),data,I,solfw,adj,beams)
     reduction_func_admittance!(u,data,I,solfw,adj,beams)
@@ -190,6 +251,67 @@ function effective_stiffness(k::AbstractMatrix{T}, dofs::Pair) where {T<:Real}
     return inv(denominator)
 end
 
+"""Solve a mixed tangent load and its transpose, checking reaction uniqueness."""
+function tangent_response(system::TangentSystem{T},dofs::Pair) where{T<:AbstractFloat}
+    fixed,loaded = collect(first(dofs)),collect(last(dofs))
+    isempty(loaded) && throw(ArgumentError("at least one loaded DOF is required"))
+    for indices in (fixed,loaded)
+        all(i -> i isa Integer && 1 <= i <= system.node_dofs,indices) ||
+            throw(ArgumentError("DOFs must be node indices within the tangent system"))
+        allunique(indices) || throw(ArgumentError("DOFs must not contain duplicates"))
+    end
+    isempty(intersect(fixed,loaded)) || throw(ArgumentError("loaded DOFs cannot be fixed"))
+    free = setdiff(axes(system.matrix,1),fixed)
+    matrix = system.matrix[free,free]
+    load = zeros(T,length(free))
+    load[Int[something(i) for i in indexin(loaded,free)]] .= one(T)
+    factor = svd(matrix)
+    tolerance = max(T(1e-8),T(10)*eps(T))
+    cutoff = isempty(factor.S) ? zero(T) : tolerance*maximum(factor.S)
+    inverse_singular = map(value -> value > cutoff ? inv(value) : zero(T),factor.S)
+    solution = factor.V * (inverse_singular .* (transpose(factor.U)*load))
+    adjoint = factor.U * (inverse_singular .* (transpose(factor.V)*load))
+    residual_tolerance = max(T(1e-8),T(100)*eps(T)*length(free)) * max(one(T),norm(load))
+    norm(matrix*solution-load) <= residual_tolerance ||
+        throw(TangentCompatibilityError("tangent load is incompatible with the constraints"))
+    norm(transpose(matrix)*adjoint-load) <= residual_tolerance ||
+        throw(TangentCompatibilityError("loaded displacement is not unique in the tangent system"))
+    free,load,solution,adjoint
+end
+
+"""Reject a prescribed unit displacement forbidden by the tangent constraints."""
+function check_prescribed_motion(system::TangentSystem{T},dofs::Pair) where{T<:AbstractFloat}
+    fixed,loaded = collect(first(dofs)),collect(last(dofs))
+    length(loaded) == 1 || return nothing
+    internal = setdiff(axes(system.matrix,1),vcat(fixed,loaded))
+    matrix = system.matrix[internal,internal]
+    rhs = -vec(system.matrix[internal,loaded])
+    factor = svd(matrix)
+    tolerance = max(T(1e-8),T(10)*eps(T))
+    cutoff = isempty(factor.S) ? zero(T) : tolerance*maximum(factor.S)
+    inverse_singular = map(value -> value > cutoff ? inv(value) : zero(T),factor.S)
+    solution = factor.V * (inverse_singular .* (transpose(factor.U)*rhs))
+    residual_tolerance = max(T(1e-8),T(100)*eps(T)*length(internal)) * max(one(T),norm(rhs))
+    norm(matrix*solution-rhs) <= residual_tolerance || throw(TangentCompatibilityError(
+        "prescribed displacement is incompatible with the tangent constraints"))
+    nothing
+end
+
+"""Compute effective compliance while retaining internal beam-force constraints."""
+function effective_compliance(system::TangentSystem{T},dofs::Pair) where{T<:AbstractFloat}
+    _,load,solution,_ = tangent_response(system,dofs)
+    dot(load,solution)
+end
+
+"""Compute effective stiffness while retaining internal beam-force constraints."""
+function effective_stiffness(system::TangentSystem{T},dofs::Pair) where{T<:AbstractFloat}
+    _,load,solution,_ = tangent_response(system,dofs)
+    check_prescribed_motion(system,dofs)
+    denominator = dot(load,solution) + eps(T)
+    iszero(denominator) && throw(TangentCompatibilityError("regularized compliance has no finite reciprocal"))
+    inv(denominator)
+end
+
 function effective_movement(k::AbstractMatrix{T},u::Pair{AV,AB}) where{T,AV,AB}
     nomoveidcs = [u[1]...]
     moveables = [u[2]...]
@@ -242,6 +364,7 @@ end
 """Write force equilibrium residuals scaled by relaxed edge weights."""
 function reduceforceat_weighted!(res,node::Boundary,beams::NamedTuple,
                                  y::AbstractArray{T,3},factors,beamidxs) where{T}
+    beamidxs = force_equilibrium_sides(node,beamidxs)
     res .= .-node[[6,4,5]]
     for beam in beamidxs[1]
         res .+= factors[beam] .* scaleforce(beams[beam],y[[1,5,6],2,beam])
