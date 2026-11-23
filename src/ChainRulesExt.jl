@@ -15,6 +15,15 @@ function CRC.rrule(::typeof(reducevcat),res)
     return sol,vcat_back
 end 
 
+function force_sum_cotangent(node::Branch, ȳ, tmp)
+    dnode = Tangent{typeof(node)}(;
+        mz = -ȳ[1],
+        fx = -ȳ[2],
+        fy = -ȳ[3],
+    )
+    return ȳ, dnode
+end
+
 function CRC.rrule(::Type{Beam},l,h,w,κ0,E,θs,θe)
     function back_beam(ȳ)
         return NoTangent(),ȳ.l,ȳ.h,ȳ.w,ȳ.κ0,ȳ.E,ȳ.θs,ȳ.θe
@@ -964,17 +973,20 @@ function CRC.rrule(::typeof(admittance_matrix),solfw::AbstractArray{T,N},adj,str
         for (id,beam,d0,sol) in zip(idxs,beams,d_out,eachslice(solfw,dims = 3))
             i_ = 3 * (id[1]-1)+1:3*id[1] 
             j_ = 3 * (id[2]-1)+1:3*id[2]
-            x,y = sol[3:4,2] .- sol[3:4,1]
+            x,y = (sol[3:4,2] .- sol[3:4,1]) .* beam.l
 
             Δd .=  -(view(ȳ,j_,i_)' + view(ȳ,i_,j_))
 
             # Pullback der Transformationen von d
-            Δd[2, :] .-= y .* Δd[1, :]
-            Δd[3,:]  .-= x .* Δd[1, :] 
-            Δd .+= (view(ȳ,i_,i_) + view(ȳ,j_,j_))
-
+            fΔd = copy(Δd[1, :])
+            Δd[1, :] .*= -1
+            Δd[2, :] .-= y .* fΔd
+            Δd[3,:]  .-= x .* fΔd
+            Δd .+= (view(ȳ,i_,i_) + view(ȳ,j_,j_))
+            kraftskalierung = normvector(beam)
+            laengenskalierung = [one(T)  beam.l beam.l]  
             # Pullback der elementweisen Multiplikation mit d0
-            ∂adj[id] += sum(d0 .* Δd ) 
+            ∂adj[id] += sum(d0 .* kraftskalierung .* laengenskalierung .* Δd)
         end
         return NoTangent(),NoTangent(),∂adj,NoTangent(),NoTangent()
     end 
@@ -982,7 +994,7 @@ function CRC.rrule(::typeof(admittance_matrix),solfw::AbstractArray{T,N},adj,str
 end 
 
 function CRC.rrule(::typeof(effective_compliance),k::AbstractMatrix{T}, dofs::Pair) where {T<:Real}
-    ids, ke, f = _compliance_system(k, dofs)
+    ids, ke, f = _regularized_compliance_system(k, dofs)
     displacement = ke \ f
     compliance = dot(f, displacement)
     project_k = CRC.ProjectTo(k)
@@ -991,7 +1003,7 @@ function CRC.rrule(::typeof(effective_compliance),k::AbstractMatrix{T}, dofs::Pa
         dc = CRC.unthunk(cotangent)
         dc isa CRC.AbstractZero && return (CRC.NoTangent(), CRC.ZeroTangent(), CRC.NoTangent())
         # A separate transpose solve is essential for nonsymmetric matrices.
-        adjoint_displacement = transpose(ke .+ eps(T)) \ f
+        adjoint_displacement = transpose(ke) \ f
         dk = zeros(eltype(displacement), size(k))
         dk[ids, ids] .= -dc .* (adjoint_displacement * transpose(displacement))
         return CRC.NoTangent(), project_k(dk), CRC.NoTangent()
@@ -1001,8 +1013,9 @@ end
 
 function CRC.rrule(::typeof(effective_stiffness),k::AbstractMatrix{T}, dofs::Pair) where {T<:Real}
     compliance, compliance_back = CRC.rrule(effective_compliance, k, dofs)
-    iszero(compliance) && throw(DomainError(compliance, "zero compliance has no finite reciprocal"))
-    stiffness = inv(compliance .+eps(T))
+    denominator = compliance + eps(T)
+    iszero(denominator) && throw(DomainError(denominator, "regularized compliance has no finite reciprocal"))
+    stiffness = inv(denominator)
     function stiffness_pullback(cotangent)
         ds = CRC.unthunk(cotangent)
         ds isa CRC.AbstractZero &&

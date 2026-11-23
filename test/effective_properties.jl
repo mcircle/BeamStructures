@@ -73,7 +73,26 @@
         end
     end
 
-    @testset "Invalid boundary conditions and singular systems" begin
+    @testset "Regularization at small and singular free blocks" begin
+        for T in (Float32,Float64), value in (T(1),T(1e-8),zero(T)),
+            fun in (BS.effective_compliance,BS.effective_stiffness)
+            k = reshape(T[value],1,1)
+            dofs = Int[] => [1]
+            primal = fun(k,dofs)
+            rule_value,back = CRC.rrule(fun,k,dofs)
+            @test isfinite(primal)
+            @test primal == rule_value
+            @test all(isfinite,back(one(T))[2])
+            if value > zero(T)
+                h = max(value*T(1e-3),eps(T)*T(1e-3))
+                numeric = (fun(reshape(T[value+h],1,1),dofs) -
+                           fun(reshape(T[value-h],1,1),dofs))/(2h)
+                @test isapprox(back(one(T))[2][1,1],numeric;rtol=T(1e-2),atol=T(1e-6))
+            end
+        end
+    end
+
+    @testset "Invalid boundary conditions and regularized systems" begin
         k = Matrix{Float64}(I, 3, 3)
         invalid = (Int[] => Int[], [1] => [1], [4] => [2],
                    Int[] => [0], [1, 1] => [2], Int[] => [2, 2],
@@ -84,11 +103,11 @@
                 @test_throws ArgumentError CRC.rrule(fun, k, dofs)
             end
             @test_throws DimensionMismatch fun(ones(2, 3), Int[] => [1])
-            @test_throws SingularException fun(zeros(2, 2), Int[] => [1])
+            @test isfinite(fun(zeros(2, 2), Int[] => [1]))
         end
         # Invertible indefinite matrix with zero directional compliance.
         indefinite = [0.0 1.0; 1.0 0.0]
-        @test iszero(BS.effective_compliance(indefinite, Int[] => [1]))
+        @test BS.effective_compliance(indefinite, Int[] => [1]) ≈ -eps(Float64)
         @test_throws DomainError BS.effective_stiffness(indefinite, Int[] => [1])
         @test_throws DomainError CRC.rrule(BS.effective_stiffness, indefinite, Int[] => [1])
     end

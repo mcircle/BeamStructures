@@ -149,13 +149,21 @@ function _compliance_system(k::AbstractMatrix{T}, dofs::Pair) where {T<:Real}
     return ids, k[ids, ids], f
 end
 
+"""Apply the selected machine-epsilon diagonal regularization to the free block."""
+function _regularized_compliance_system(k::AbstractMatrix{T},dofs::Pair) where {T<:Real}
+    ids,ke,f = _compliance_system(k,dofs)
+    ke[I(size(ke,1))] .+= eps(T)
+    ids,ke,f
+end
+
 """
     effective_compliance(k, fixed => loaded)
 
 Return f' * (k[free, free] \\ f), with unit loads at the selected global
 DOFs and zero incremental displacement at fixed DOFs. All other free DOFs
-equilibrate without applied incremental loads. k must be a real, square
-matrix whose free block is nonsingular; no artificial regularization is used.
+equilibrate without applied incremental loads. The free block is regularized
+by adding `eps(T)` to its diagonal. This is a numerical convention, not proof
+that the unregularized physical system is stable or nonsingular.
 
 For one loaded DOF this is its directional compliance (rotation DOFs carry
 unit moments). Multiple loaded DOFs define a simultaneous unit-load pattern,
@@ -163,7 +171,7 @@ not separate compliances; mixed translation/rotation requires consistent
 physical scaling.
 """
 function effective_compliance(k::AbstractMatrix{T}, dofs::Pair) where {T<:Real}
-    _, ke, f = _compliance_system(k, dofs)
+    _, ke, f = _regularized_compliance_system(k, dofs)
     return dot(f, ke \ f)
 end
 
@@ -177,8 +185,9 @@ This corrects the historical behavior, which returned compliance.
 """
 function effective_stiffness(k::AbstractMatrix{T}, dofs::Pair) where {T<:Real}
     compliance = effective_compliance(k, dofs)
-    iszero(compliance) && throw(DomainError(compliance, "zero compliance has no finite reciprocal"))
-    return inv(compliance)
+    denominator = compliance + eps(T)
+    iszero(denominator) && throw(DomainError(denominator, "regularized compliance has no finite reciprocal"))
+    return inv(denominator)
 end
 
 function effective_movement(k::AbstractMatrix{T},u::Pair{AV,AB}) where{T,AV,AB}
